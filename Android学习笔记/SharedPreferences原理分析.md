@@ -1,0 +1,34 @@
+# SharedPreferences原理分析
+
+SharedPreferences是Android中较常用的一个存储数据的方式，他将数据以键值对的方式存储在~/data/data/包名/shared_prefs这个xml文件中。
+
+它可以存储的数据较为固定，如果我们需要存储一些小数据或者一个小型的可序列化的Bean实体类的，使用SharedPreferences是最明智的选择。
+
+先看SharedPreferences的获取，通常直接调用`Context.getSharedPreferences`方法，两个参数，一个是你要指定SharedPreferences的的名字，使用同一个名字的话，只会取到相同的文件。第二个参数是mode，也就是访问方式，现在只有一个MODE_PRIVATE模式：私有模式，该SharedPreferences只会被调用他的APP去使用，其他的APP无法获取到这个SharedPreferences。
+
+接着看存数据，SharedPreferences并没有提供存储操作，必须获取`SharedPreferences.Editor`对象来进行操作，然后使用apply或者commit提交。
+
+## getSharedPreferences
+
+`getSharedPreferences`会判断name是否为null，如果为null，就将name设置成“null”
+
+然后根据name来取文件，没有文件就创建一个文件并放到ArrayMap中。
+
+拿到文件后，再次调用`getSharedPreferences`重载方法，就会在内存中查找是否有相应文件的缓存数据，如果有，就不用从磁盘加载，如果没有，就创建SharedPreferencesImpl类，在这个类的构造函数中调用`startLoadFromDisk()`方法从磁盘加载数据进入内存。
+
+之后调用get方法就直接从内存的map中取数据了
+
+## Edit
+
+edit是我们用SharedPreferences提交数据时使用到的类，当我们要向sp提交数据时，使用edit中的putxxx系列方法，它们不会将我们的数据立刻提交到磁盘中缓存，而是会将我们的k-v放到一个map中，等到我们之后执行commit或者apply方法时，才会提交到文件中。
+
+在commit/apply方法中，会先将我们map中的数据提交到内存中，提交到内存时会比较与mMap这个map的改变，然后put进去，最后将这个mMap提交到磁盘。
+
+commit会同步的在主线程提交磁盘，因此会阻塞主线程，如果提交数据过多，容易引发ANR，同时由于是同步的，可以获取到返回值。
+
+apply是异步提交磁盘，它会将提交任务交给一个singleThreadExecutor线程池去处理，因此不会阻塞主线程，但是无法获取到返回值。同时，由于apply会将任务加入到QueueWork等待队列中，当提交任务执行完之后会从队列中移除，在回调onStop方法时，会检查该队列中是否还有任务，如果有，就会等待这个队列中的任务执行完毕，所以，apply也有ANR的风险。
+
+**SP的备份机制：**
+
+在我们向磁盘提交文件时，可能会因为某种原因以外退出，就会对我们的文件造成一些不可知的更改，所以，在写入磁盘之前会创建出同名的备份文件，当写入成功后，会删除这个备份文件。如果在写入过程中以外退出了，当我们下次初始化sp的时候，会检查有没有备份文件，有备份文件的化，就恢复备份文件，这样就不会影响我们的原文件了。
+
